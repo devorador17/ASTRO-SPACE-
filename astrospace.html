@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>ASTRO-SPACE</title>
+<style>
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    font-family: monospace;
+    user-select: none;
+}
+html, body {
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+    background: #050510;
+}
+canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    image-rendering: pixelated;
+}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// ==================================================
+// ESTADOS DEL JUEGO
+// ==================================================
+const STATE = {
+    MENU: 'menu',
+    PLAYING: 'playing'
+};
+let currentState = STATE.MENU;
+
+// ==================================================
+// PALETA DE COLORES
+// ==================================================
+const C = {
+    bg: '#050510',
+    title: '#a855ff',
+    titleGlow: '#c880ff',
+    text: '#e0e0e8',
+    textDim: '#707590',
+    buttonBg: 'rgba(40, 45, 70, 0.6)',
+    buttonHover: 'rgba(80, 60, 120, 0.4)',
+    border: '#505580',
+    highlight: '#00eebb',
+    floor: '#555965',
+    grid: '#444855',
+    wall: '#3c3f4f',
+    wallBorder: '#7a7f8f',
+    uiBg: '#2a2d3a',
+    danger: '#ff6644',
+    safe: '#66ee66',
+    reactorCore: '#fff888',
+    engineRed: '#ff4422'
+};
+
+// ==================================================
+// ESTRELLAS DE FONDO
+// ==================================================
+const stars = [];
+for (let i = 0; i < 200; i++) {
+    stars.push({
+        x: Math.random() * 2000,
+        y: Math.random() * 1200,
+        size: Math.random() * 2 + 0.5,
+        twinkle: Math.random() * Math.PI * 2
+    });
+}
+const shootingStars = [];
+for (let i = 0; i < 4; i++) {
+    shootingStars.push({
+        x: Math.random() * 1200, y: Math.random() * 700,
+        len: 60 + Math.random() * 80, speed: 10 + Math.random() * 8,
+        opacity: 0, cooldown: 200 + Math.random() * 400
+    });
+}
+
+// ==================================================
+// EASTER EGG
+// ==================================================
+let multiClickCount = 0, lastClickTime = 0, rainbowMode = false, rainbowHue = 0;
+
+// ==================================================
+// BOTONES DEL MENÚ
+// ==================================================
+const MENU_BTNS = [
+    { label: 'SINGLE PLAYER', id: 'single', w: 280, h: 55 },
+    { label: 'MULTIPLAYER', id: 'multi', w: 280, h: 55 },
+    { label: 'SETTINGS', id: 'settings', w: 280, h: 55 },
+    { label: 'SUPPORT', id: 'support', w: 280, h: 55 }
+];
+MENU_BTNS.forEach((btn, i) => {
+    btn.x = canvas.width / 2 - btn.w / 2;
+    btn.y = canvas.height / 2 - 60 + i * 75;
+    btn.hover = false;
+});
+
+// ==================================================
+// DETECCIÓN DE ENTRADA
+// ==================================================
+const KEYS = {};
+document.addEventListener('keydown', e => KEYS[e.code] = true);
+document.addEventListener('keyup', e => KEYS[e.code] = false);
+
+canvas.addEventListener('mousemove', e => {
+    if (currentState !== STATE.MENU) return;
+    const r = canvas.getBoundingClientRect();
+    const mx = e.clientX - r.left, my = e.clientY - r.top;
+    MENU_BTNS.forEach(btn => {
+        btn.hover = mx >= btn.x && mx <= btn.x + btn.w && my >= btn.y && my <= btn.y + btn.h;
+    });
+});
+
+canvas.addEventListener('click', e => {
+    const r = canvas.getBoundingClientRect();
+    const mx = e.clientX - r.left, my = e.clientY - r.top;
+    const now = Date.now();
+
+    if (currentState === STATE.MENU) {
+        for (const btn of MENU_BTNS) {
+            if (mx >= btn.x && mx <= btn.x + btn.w && my >= btn.y && my <= btn.y + btn.h) {
+                if (btn.id === 'single') currentState = STATE.PLAYING;
+                if (btn.id === 'multi') {
+                    multiClickCount = (now - lastClickTime < 1000) ? multiClickCount + 1 : 1;
+                    lastClickTime = now;
+                }
+                if (btn.id === 'support' && multiClickCount >= 2) rainbowMode = true;
+                return;
+            }
+        }
+    }
+});
+
+// ==================================================
+// PERSONAJE — ASTRONAUTA BASE
+// ==================================================
+const PLAYER = {
+    x: 0, y: 0, w: 32, h: 36, speed: 3, runSpeed: 5,
+    floating: false, floatHeight: 0, bobPhase: 0, onGround: true,
+    running: false, bonusActive: false
+};
+function resetPlayer() {
+    PLAYER.x = canvas.width / 2 - 16;
+    PLAYER.y = canvas.height / 2 - 18;
+    PLAYER.floating = false;
+    PLAYER.floatHeight = 0;
+}
+
+// ==================================================
+// RECURSOS EN EL MAPA
+// ==================================================
+const RESOURCES = [
+    { type: 'bateria', x: 220, y: 200, collected: false },
+    { type: 'bateria', x: 300, y: 420, collected: false },
+    { type: 'placa', x: canvas.width - 320, y: 260, collected: false },
+    { type: 'chip', x: canvas.width / 2 + 100, y: 380, collected: false }
+];
+let extractCooldown = 0;
+
+// ==================================================
+// FUNCIONES DE DIBUJO — FONDO
+// ==================================================
+function drawBackground() {
+    ctx.fillStyle = C.bg;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    for (const s of stars) {
+        s.twinkle += 0.02;
+        const a = 0.2 + Math.abs(Math.sin(s.twinkle)) * 0.6;
+        ctx.fillStyle = `rgba(255,255,255,${a})`;
+        ctx.fillRect(s.x % canvas.width, s.y % canvas.height, s.size, s.size);
+    }
+    for (const sf of shootingStars) {
+        sf.cooldown--;
+        if (sf.cooldown <= 0) {
+            sf.opacity = Math.min(1, sf.opacity + 0.04);
+            sf.x += sf.speed; sf.y += sf.speed * 0.4;
+            ctx.strokeStyle = `rgba(255,255,255,${sf.opacity})`;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(sf.x, sf.y);
+            ctx.lineTo(sf.x - sf.len * 0.6, sf.y - sf.len * 0.25);
+            ctx.stroke();
+            if (sf.x > canvas.width + 150) {
+                sf.x = Math.random() * canvas.width * 0.5;
+                sf.y = Math.random() * canvas.height * 0.4;
+                sf.opacity = 0;
+                sf.cooldown = 250 + Math.random() * 500;
+            }
+        }
+    }
+}
+
+function drawTitle() {
+    const tx = canvas.width / 2, ty = canvas.height * 0.22;
+    ctx.font = 'bold 80px monospace';
+    ctx.textAlign = 'center';
+    if (rainbowMode) {
+        rainbowHue = (rainbowHue + 3) % 360;
+        ctx.fillStyle = `hsl(${rainbowHue},100%,65%)`;
+        ctx.shadowColor = `hsl(${rainbowHue},100%,50%)`;
+        ctx.shadowBlur = 25;
+    } else {
+        ctx.fillStyle = C.title;
+        ctx.shadowColor = C.titleGlow;
+        ctx.shadowBlur = 15;
+    }
+    ctx.fillText('ASTRO-SPACE', tx, ty);
+    ctx.shadowBlur = 0;
+}
+
+function drawMenuButtons() {
+    MENU_BTNS.forEach(btn => {
+        ctx.fillStyle = btn.hover ? C.buttonHover : C.buttonBg;
+        ctx.fillRect(btn.x, btn.y, btn.w, btn.h);
+        ctx.strokeStyle = btn.hover ? C.highlight : C.border;
+        ctx.lineWidth = btn.hover ? 3 : 2;
+        ctx.strokeRect(btn.x, btn.y, btn.w, btn.h);
+        ctx.font = 'bold 22px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillStyle = btn.hover ? C.highlight : C.text;
+        ctx.fillText(btn.label, btn.x + btn.w/2, btn.y + 35);
+    });
+}
+
+// ==================================================
+// FUNCIONES DE DIBUJO — MAPA DE LA ESTACIÓN
+// ==================================================
+function drawGrid(x, y, w, h, tile = 32) {
+    ctx.fillStyle = C.floor;
+    ctx.fillRect(x, y, w * tile, h * tile);
+    ctx.strokeStyle = C.grid;
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= w; i++) {
+        ctx.beginPath(); ctx.moveTo(x + i*tile, y); ctx.lineTo(x + i*tile, y + h*tile); ctx.stroke();
+    }
+    for (let j = 0; j <= h; j++) {
+        ctx.beginPath(); ctx.moveTo(x, y + j*tile); ctx.lineTo(x + w*tile, y + j*tile); ctx.stroke();
+    }
+}
+
+function drawWall(x, y, w, h) {
+    ctx.fillStyle = C.wall;
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = C.wallBorder;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x, y, w, h);
+}
+
+function drawStation() {
+    const pad = 60;
+    const topPad = 55;
+    const mw = canvas.width - pad * 2;
+    const mh = canvas.height - topPad - pad;
+
+    // Barra superior del mapa
+    ctx.fillStyle = C.uiBg;
+    ctx.fillRect(0, 0, canvas.width, topPad);
+    ctx.font = 'bold 20px monospace';
+    ctx.fillStyle = C.highlight;
+    ctx.textAlign = 'left';
+    ctx.fillText('SPACE STATION MAP', 20, 36);
+    ctx.font = '13px monospace';
+    ctx.fillStyle = C.textDim;
+    ctx.textAlign = 'right';
+    ctx.fillText('60 FPS • METALLIC SCI-FI', canvas.width - 20, 36);
+
+    // Ala Superior Izquierda
+    const aw = mw * 0.3, ah = mh * 0.42;
+    drawWall(pad, topPad, aw, ah);
+    drawGrid(pad + 16, topPad + 16, Math.floor((aw-32)/32), Math.floor((ah-32)/32));
+    ctx.font = 'bold 13px monospace';
+    ctx.fillStyle = C.textDim;
+    ctx.textAlign = 'left';
+    ctx.fillText('UPPER WING', pad + 16, topPad + 30);
+
+    // Ala Inferior Izquierda
+    const iy = topPad + mh - ah;
+    drawWall(pad, iy, aw, ah);
+    drawGrid(pad + 16, iy + 16, Math.floor((aw-32)/32), Math.floor((ah-32)/32));
+    ctx.fillText('LOWER WING', pad + 16, iy + 30);
+
+    // Sala Central
+    const cx = pad + aw + 16;
+    const cw = mw - aw - 32;
+    drawGrid(cx, topPad, Math.floor(cw/32), Math.floor(mh/32));
+
+    // Cockpit
+    const cw = 160, ch = 50;
+    drawWall(canvas.width/2 - cw/2, topPad + 16, cw, ch);
+    ctx.fillStyle = '#224488';
+    for(let i=0; i<4; i++) {
+        ctx.fillRect(canvas.width/2 - 72 + i*40, topPad + 22, 34, 34);
+    }
+    ctx.font = '11px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('COCKPIT', canvas.width/2, topPad + ch + 38);
+
+    // Sala de Motores — Derecha
+    const erx = canvas.width - pad - 160;
+    drawWall(erx, topPad + 16, 160, mh - 32);
+    drawEngine(erx + 110, topPad + 90);
+    drawEngine(erx + 110, topPad + mh - 90);
+    ctx.fillStyle = C.danger;
+    ctx.fillText('ENGINE ROOM', erx + 100, topPad + mh - 10, 'center');
+
+    // Leyenda
+    ctx.fillStyle = C.uiBg;
+    ctx.fillRect(pad, iy + ah + 10, aw, 90);
+    ctx.strokeStyle = C.wallBorder;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(pad, iy + ah + 10, aw, 90);
+    ctx.font = '11px monospace';
+    ctx.fillStyle = C.textDim;
+    const legend = [
+        'MAP LEGEND:',
+        'HALLS = METAL GREY',
+        'FLOOR = METALLIC GRID',
+        'WALL = METALLIC DARK',
+        '',
+        `STATION INTEGRITY: 97%`,
+        `POWER: ONLINE`,
+        `THREAT: NONE`
+    ];
+    legend.forEach((t, i) => {
+        ctx.fillStyle = t.includes('97%') || t.includes('ONLINE') ? C.safe :
+                        t.includes('NONE') ? C.highlight : C.textDim;
+        ctx.fillText(t, pad + 12, iy + ah + 26 + i*10);
+    });
+}
+
+function drawEngine(cx, cy) {
+    ctx.fillStyle = '#444450';
+    ctx.fillRect(cx - 48, cy - 36, 96, 72);
+    ctx.fillStyle = C.engineRed;
+    ctx.beginPath();
+    ctx.moveTo(cx + 48, cy - 24);
+    ctx.lineTo(cx + 72, cy);
+    ctx.lineTo(cx + 48, cy + 24);
+    ctx.closePath();
+    ctx.fill();
+    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, 28);
+    grad.addColorStop(0, C.reactorCore);
+    grad.addColorStop(0.4, '#ffaa00');
+    grad.addColorStop(1, C.engineRed);
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 28, 0, Math.PI*2);
+    ctx.fill();
+    ctx.strokeStyle = '#ffcc0066';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 36, 0, Math.PI*2);
+    ctx.stroke();
+}
+
+// ==================================================
+// RECURSOS
+// ==================================================
+function drawResources() {
+    for (const r of RESOURCES) {
+        if (r.collected) continue;
+        if (r.type === 'bateria') {
+            ctx.fillStyle = '#ffcc00';
+            ctx.fillRect(r.x - 8, r.y - 12, 16, 24);
+            ctx.fillStyle = '#e6b800';
+            ctx.fillRect(r.x - 4, r.y - 16, 8, 4);
+        } else if (r.type === 'placa') {
+            ctx.fillStyle = '#5588cc';
+            ctx.fillRect(r.x - 14, r.y - 10, 28, 20);
+            ctx.fillStyle = '#335588';
+            for(let i=0; i<4; i++) ctx.fillRect(r.x - 10 + i*7, r.y - 6, 5, 12);
+        } else if (r.type === 'chip') {
+            ctx.fillStyle = '#00ddaa';
+            ctx.fillRect(r.x - 10, r.y - 10, 20, 20);
+            ctx.fillStyle = '#00aa88';
+            ctx.fillRect(r.x - 6, r.y - 2, 12, 4);
+            ctx.fillRect(r.x - 2, r.y - 6, 4, 12);
+        }
+    }
+}
+
+// ==================================================
+// PERSONAJE
+// ==================================================
+function drawPlayer() {
+    const px = PLAYER.x, py = PLAYER.y - PLAYER.floatHeight;
+    const bob = PLAYER.onGround ? Math.sin(PLAYER.bobPhase) * 1.5 : 0;
+
+    // Sombra
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.beginPath();
+    ctx.ellipse(px+16, py+PLAYER.h+2, 14, 5, 0, 0, Math.PI*2);
+    ctx.fill();
+
+    // Cuerpo
+    ctx.fillStyle = PLAYER.running ? '#b8b8c0' : '#d8d8e0';
+    ctx.fillRect(px+6, py+16+bob, 20, 14);
+    // Casco
+    ctx.fillStyle = '#c0c0c8';
+    ctx.beginPath();
+    ctx.arc(px+16, py+12+bob, 12, Math.PI, 0);
+    ctx.fill();
+    // Visor
+    ctx.fillStyle = '#3399ff';
+    ctx.beginPath();
+    ctx.arc(px+16, py+12+bob, 9, Math.PI, 0);
+    ctx.fill();
+    // Reflejo
+    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+    ctx.fillRect(px+10, py+6+bob, 4, 3);
+    ctx.fillRect(px+15, py+9+bob, 3, 2);
+    // Brazos
+    ctx.fillStyle = '#b0b0b8';
+    ctx.fillRect(px+2, py+18+bob, 5, 8);
+    ctx.fillRect(px+25, py+18+bob, 5, 8);
+    // Piernas
+    ctx.fillRect(px+8, py+28+bob, 6, 8);
+    ctx.fillRect(px+18, py+28+bob, 6, 8);
+
+    if (PLAYER.bonusActive) {
+        ctx.strokeStyle = 'rgba(0,255,200,0.4)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(px+16, py+18, 26 + Math.sin(Date.now()/150)*3, 0, Math.PI*2);
+        ctx.stroke();
+    }
+}
+
+// ==================================================
+// LÓGICA DEL JUEGO
+// ==================================================
+let landingWave = {active:false, r:0, alpha:0};
+
+function update() {
+    if (extractCooldown > 0) extractCooldown--;
+
+    if (currentState === STATE.PLAYING) {
+        PLAYER.running = KEYS['KeyA'];
+        PLAYER.bonusActive = KEYS['KeyS'];
+
+        // Extraer recursos con D
+        if (KEYS['KeyD'] && extractCooldown === 0) {
+            for (const r of RESOURCES) {
+                if (r.collected) continue;
+                const dist = Math.hypot(PLAYER.x+16 - r.x, PLAYER.y+18 - r.y);
+                if (dist < 55) {
+                    r.collected = true;
+                    extractCooldown = 25;
+                }
+            }
+        }
+
+        // Movimiento
+        const spd = PLAYER.running ? PLAYER.runSpeed : PLAYER.speed;
+        let dx = 0, dy = 0;
+        if (KEYS['ArrowUp'] || KEYS['KeyW']) dy = -1;
+        if (KEYS['ArrowDown'] || KEYS['KeyS']) dy = 1;
+        if (KEYS['ArrowLeft']) dx = -1;
+        if (KEYS['ArrowRight']) dx = 1;
+
+        if (dx !== 0 && dy !== 0) {
+            const len = Math.hypot(dx, dy);
+            dx /= len; dy /= len;
+        }
+        PLAYER.x += dx * spd;
+        PLAYER.y += dy * spd;
+
+        // Límites del mapa
+        const pad = 60, topPad = 55;
+        PLAYER.x = Math.max(pad + 48, Math.min(canvas.width - pad - 48 - PLAYER.w, PLAYER.x));
+        PLAYER.y = Math.max(topPad + 48, Math.min(canvas.height - pad - 48 - PLAYER.h, PLAYER.y));
+
+        // Flotar / Bajar
+        if (KEYS['KeyZ'] && !PLAYER.floating) PLAYER.floating = true;
+        if (KEYS['KeyF'] && PLAYER.floating) PLAYER.floating = false;
+
+        if (PLAYER.floating) {
+            PLAYER.floatHeight = Math.min(45, PLAYER.floatHeight + 1.5);
+        } else {
+            if (PLAYER.floatHeight > 0) {
+                PLAYER.floatHeight = Math.max(0, PLAYER.floatHeight - 2);
+                if (PLAYER.floatHeight === 0 && !PLAYER.onGround) {
+                    landingWave = {active:true, r:10, alpha:0.6};
+                    PLAYER.onGround = true;
+                }
+            } else PLAYER.onGround = true;
+        }
+        PLAYER.bobPhase += PLAYER.running ? 0.18 : 0.08;
+    }
+
+    if (landingWave.active) {
+        landingWave.r += 3;
+        landingWave.alpha -= 0.02;
+        if (landingWave.alpha <= 0) landingWave.active = false;
+    }
+}
+
+// ==================================================
+// BUCLE PRINCIPAL
+// ==================================================
+function loop() {
+    update();
+    if (currentState === STATE.MENU) {
+        drawBackground();
+        drawTitle();
+        drawMenuButtons();
+        ctx.font = '14px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillStyle = C.textDim;
+        ctx.fillText('© 2026 ASTRO-SPACE — Toca SINGLE PLAYER para empezar', canvas.width/2, canvas.height - 25);
+    } else {
+        drawBackground();
+        drawStation();
+        drawResources();
+        drawPlayer();
+
+        // Onda de aterrizaje
+        if (landingWave.active) {
+            ctx.strokeStyle = `rgba(255,255,255,${landingWave.alpha})`;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.ellipse(PLAYER.x+16, PLAYER.y+PLAYER.h, landingWave.r, landingWave.r*0.4, 0, 0, Math.PI*2);
+            ctx.stroke();
+        }
+
+        // Instrucciones
+        ctx.font = '12px monospace';
+        ctx.textAlign = 'right';
+        ctx.fillStyle = 'rgba(255,255,255,0.35)';
+        ctx.fillText('W=Mover A=Correr S=Bonif D=Extraer Z=Flotar F=Bajar', canvas.width - 16, canvas.height - 12);
+    }
+    requestAnimationFrame(loop);
+}
+resetPlayer();
+loop();
+</script>
+</body>
+</html>
